@@ -1,0 +1,169 @@
+---
+title: "Fine-scale mapping of savanna physiognomic types"
+author: "Fernanda Ribeiro"
+date: "June 1, 2020"
+output:
+  html_document: default
+  pdf_document: default
+subtitle: Mapping major land cover types using Random Forest (level 1 classification)
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This document is part of the GEOBIA Classification Framework published in Ribeiro et al. 2020 (orcid: xxxx). The code below corresponds to the framework's level 1 classification, which aims at mapping major land cover types in Neotropical savannas using high spatial resolution imagery (i.e. RapidEye, 5m spatial resolution). The example below was performed for the Taquara Watershed site (encompassing the IBGE Ecological Reserve) and the same steps described below were repeated for the Western Bahia site.
+
+## Pre-processing 
+
+### Defining land cover classes
+
+The land cover classes were defined based on the Land Cover Classification System (LCCS) from the Food and Agriculture Organization (FAO), adapted to the RapidEye imagery specs: 1) closed-canopy trees, 2) open canopy trees, 3) dense shrub, 4) open shrub, 5) scrub-shrub, 6) shrub-herb, 7) herbaceous (invasive), 8) herbaceous (dry), 9) herbaceous (wet), 10) soil, NPV, impervious surfaces (bright), 11) soil, NPV, impervious surfaces (dark), 12) water/shade
+
+### Imagery acquisition & pre-processing steps
+
+The RapidEye tiles were acquired from the Brazilian Ministry of the Environment (MMA) imagery repository; 1 tile was collected for the Taquara site (2013, dry season) and 16 tiles were collected for the Western Bahia site (2011, dry season). Atmospheric correction and reflectance retrieval of all individual imagery tiles were performed using ACORN 4.0 software. 
+
+### **Level 1 Classification**
+*Using the Random Forest algorithm to map major land cover types*
+
+```{r}
+# Setup workspace
+setwd("/Users/fernandaribeiro/Documents/ribeiro2020_repo/level1_classif/taq_data")
+
+# Load libraries
+library(rgdal) 
+library(foreign) 
+library(randomForest) 
+library(dplyr)
+library(ggplot2)
+```
+
+### Image Segmentation
+
+Often in land cover classification, we use raster imagery to predict a map based on a classification model using an algorithm of choice. In GEOBIA, we use a shapefile of image objects (a.k.a. polygons derived from image segmentation) to predict our map.
+
+In this paper, image segmentation was performed in eCognition Developer 8.0 using the multi-resolution segmentation (MRS) algorithm proposed by Baatz and Schape (2000).This step resulted in a total of X image objects (segments/polygons) for the Taquara site.
+
+#### *Deriving spectral variables (e.g. statistics and indices)*
+Spectral variables (object features) were derived to be used as inputs in the land cover classification model. We derived the following spectral variables for all individual image objects covering the entire extent of the imagery: a) brightness, b) mean reflectance value of each spectral band, c) standard deviation reflectance value of each spectral band, d) Indices (NDVI, NDVI -- red-edge, NDWI) 
+
+The image objects generated in the segmentation (along with derived spectral variables) were exported to a shapefile, which will be used to predict our Level 1 classification map. Now, let's import it into R:
+
+```{r}
+# Importing objects covering the entire extent of the imagery
+
+all_obj <- read.dbf("taq_all_obj_v10.dbf") #reads .dbf table from a shp containing all polygons generated in the image segmentation
+```
+
+### Training data collection
+
+We collected training data using visual interpretation assisted by orthophotos and Google Earth images covering the study sites in an external GIS interface. The samples were collectedat the object level, meaning that each sample corresponds to an image object (polygon) generated in the segmentation process. This resulted in a total of 600 polygons collected, distributed over a total of 9 classes for the Taquara site. 
+
+```{r}
+# Importing training data
+
+training_obj <- read.dbf("taq_training_v10.dbf") #reads training data .dbf table
+```
+
+#### **IMPORTANT!**
+Before moving forward, make sure that both shapefiles ('all_obj' & 'training_obj') have a shared ID column. This will be crucial in further steps!
+
+```{r}
+head(training_obj, 3)
+head(all_obj, 3)
+```
+
+# Random Forest model
+
+All training samples were used as inputs in a random forest (RF) model to map the major land cover types defined. The model accounts for all spectral variables derived in the previous (image segmentation) step.
+
+```{r}
+# Creating Random Forest classification model
+model_rf <- randomForest(classes ~ brightness + mean_b1 + mean_b2 + mean_b3 + mean_b4 + mean_b5 + NDVI + NDVIred + NDWI + stdev_b1 + stdev_b2 + stdev_b3 + stdev_b4 + stdev_b5, data = training_obj, importance = TRUE, progress='text')
+
+```
+
+We can now visualize the result of our RF model and the importance of each band (spectral variable) used in the model:
+
+```{r}
+print(model_rf) # shows RF model
+```
+#### *Checking out-of-bag (OOB) error estimates*
+Random Forest generates an out-of-bag (OOB) error estimate using subsampling and bootstrapping, accounting for samples not used to train the model. The OOB error for the Taquara site was 7.8% (thus, 92.2% overall accuracy). However, the OOB error is subject to spatial autocorrelation, which can generate inflated estimates and should be used with caution. Best practices to evaluate accuracy of thematic maps recommend additional independent validation.
+```{r}
+importance(model_rf) # displays importance of each band used in the model
+```
+
+
+
+We can now use our RF model to predict our Level 1 classification
+
+```{r}
+# Predict land cover classification (level 1) based on RF model
+# For this step, make sure that "all_obj" shp has an ID column
+
+pred_rf <- predict(model_rf, all_obj, type='response', overwrite=TRUE, progress='text')
+```
+
+Notice that our predictions (pred_rf) file is in a *factor* format. The next step is to convert *predictions* into a shapefile
+```{r}
+## step 1. Transform pred_rf (factor format) to dataframe
+predictions <- as.data.frame(pred_rf) #transform to dataframe
+
+## step 2. create ID for predictions
+id <- rownames(predictions) #create an ID vector
+id_pred <- cbind(id=id, predictions) #create an ID column to 'predictions'
+#names(d) <- c('id', 'pred_rf')  #rename columns if needed
+#names(d) #check column names
+#
+```
+
+Let's import the shapefile containing all image objects derived for the whole imagery
+
+```{r}
+## Read all segments shapefile
+
+library(sf)
+all_segs <- st_read("taq_all_obj_v10.shp", layer="taq_all_obj_v10") #reads shapefile
+```
+
+#### *Important Notice*
+The "all objects" shapefile must contain the following columns: **id**, where there's a unique ID for each polygon, and **class name** (this can contain the actual class names or a code for each class name);
+
+Now, we can convert our predictions dataframe into a shapefile
+
+```{r}
+## Merge predictions and all segments shapefile by ID
+predVals <- merge(all_segs, id_pred, by="id") #merge "all segments" shapefile with "d" (predictions with id)
+
+## Export predictions to a shapefile
+#writeOGR(obj=predVals, dsn = '.', layer="taq_level1_classif", driver="ESRI Shapefile")
+
+## Plot final classification
+predVals$pred_rf <- as.character(predVals$pred_rf)
+predVals$pred_rf[predVals$pred_rf=="closed_canopy"]<-"Closed canopy"
+predVals$pred_rf[predVals$pred_rf=="dense_shrub"]<-"Dense shrub"
+predVals$pred_rf[predVals$pred_rf=="herbaceous"]<-"Herbaceous (invasive)"
+predVals$pred_rf[predVals$pred_rf=="herbaceous_dry"]<-"Herbaceous (dry)"
+predVals$pred_rf[predVals$pred_rf=="herbaceous_wet"]<-"Herbaceous (wet)"
+predVals$pred_rf[predVals$pred_rf=="open_canopy"]<-"Open canopy"
+predVals$pred_rf[predVals$pred_rf=="open_shrub"]<-"Open shrub"
+predVals$pred_rf[predVals$pred_rf=="soil_NPV_imp_bright"]<-"Soil, NPV, impervious (bright)"
+predVals$pred_rf[predVals$pred_rf=="soil_NPV_imp_dark"]<-"Soil, NPV, impervious (dark)"
+
+
+classCol <- c("#004529", "#238443", "#addd8e", 
+              "#ffeda0", "#a8ddb5", "#993404",
+              "#66c2a4", "#ffffff", "#d9d9d9")
+
+map <- ggplot() + geom_sf(data = predVals, aes(fill = factor(pred_rf)), color = NA) +
+      scale_fill_manual(name = "Classes", values = classCol) +
+      ggtitle("Taquara site - Level 1 Classification") +
+      coord_sf()
+map
+```
+
+This step concludes the "Level 1 Classification" of the GEOBIA Framework. For additional details, please check Ribeiro et al. (2020) or contact the corresponding author (contact: fernanda.ffr@gmail.com)
